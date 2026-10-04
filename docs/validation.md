@@ -1,121 +1,102 @@
 # Validation
 
-ForgeCast is validated as a temporal system: the model score matters, but so do causality, state integrity, feedback pairing, and lifecycle safety.
+ForgeCast is validated as a temporal ML system. The evaluation covers data contracts, causal feature construction, chronological model comparison, prediction/feedback pairing, missingness recovery, monitoring behavior, retraining boundaries, and the hosted demonstration path.
 
-## Temporal correctness
+## Validation Scope
 
-The raw dataset contains 35,040 rows at a nominal 15-minute cadence. The source stores each daily `00:00` record as the interval closing at midnight, so the implementation preserves source row order instead of naively sorting literal timestamps.
-
-For every prediction:
+Validation is designed to catch both model-quality errors and system-level temporal errors. The most important invariant is:
 
 ```text
 feature_source_time <= forecast_cutoff < target_time
 ```
 
-The test suite covers future-row poisoning, lag/rolling boundaries, timestamp continuity, duplicate delivery, skipped intervals, out-of-order records, and midnight transitions.
+A prediction uses only information logically available by its forecast cutoff. Delayed labels are handled separately after the target interval closes.
 
-## Forecast evaluation
+## Dataset
 
-The frozen v1 model was evaluated with three chronological windows.
+The project uses the UCI Steel Industry Energy Consumption dataset. The source file contains 35,040 telemetry rows at a nominal 15-minute cadence and 11 source fields.
 
-| Fold | ML MAE | Persistence MAE | MAE reduction |
-|---|---:|---:|---:|
-| 1 | 3.7735 | 5.2173 | 27.67% |
-| 2 | 4.6011 | 6.6360 | 30.67% |
-| 3 | 3.2133 | 4.2532 | 24.45% |
-| **Pooled** | **3.8626** | **5.3688** | **28.05%** |
+The implementation preserves source row order and applies a logical timestamp rule for the daily `00:00` closing record so that the 15-minute sequence remains continuous across midnight. This avoids corrupting the sequence by naively sorting the raw clock values.
 
-The pooled evaluation contains **10,512 held-out observations**.
+## Leakage Controls
 
-The active feature contract was kept deliberately compact. The historical comparison showed that adding 16 historical electrical features changed aggregate MAE by only about **0.69%** and degraded one chronological window, so the 19-feature Usage + Calendar contract remained the primary formulation.
+Several controls are enforced in code and tested explicitly:
 
-## Operational replay
+- Contemporaneous target-interval electrical measurements and target-derived CO2 are excluded from the primary 15-minute feature contract.
+- The primary feature set uses historical Usage lags/rollups and calendar information known for the target interval.
+- The stateful generator requires 96 contiguous observations before the first forecast.
+- The model wrapper rejects missing, extra, or misordered features and rejects target leakage through `target_usage_kwh`.
+- Retraining partitions are defined by `target_timestamp`, with explicit checks for temporal separation and disjoint train/validation target sets.
+- The model configuration disables internal `early_stopping` so model fitting does not introduce a hidden non-chronological split.
 
-The full replay exercises the prediction-to-feedback lifecycle over all 35,040 telemetry rows.
+These controls are structural. They do not depend on test-set performance to choose features or hyperparameters.
 
-Observed results:
+## Chronological Evaluation
 
-| Metric | Result |
-|---|---:|
+The frozen v1 model was evaluated over three expanding chronological windows of 3,504 observations each.
+
+| Fold | ML MAE | Persistence MAE | ML MAE reduction |
+| --- | ---: | ---: | ---: |
+| 1 | 3.7735 kWh | 5.2173 kWh | 27.67% |
+| 2 | 4.6011 kWh | 6.6360 kWh | 30.67% |
+| 3 | 3.2133 kWh | 4.2532 kWh | 24.45% |
+| **Pooled** | **3.8626 kWh** | **5.3688 kWh** | **28.05%** |
+
+The pooled result covers 10,512 held-out observations. The third fold is also the post-training replay window for the active v1 artifact.
+
+## Operational Validation
+
+A full historical replay exercised the prediction-to-feedback lifecycle over all 35,040 telemetry records.
+
+| Operational result | Count |
+| --- | ---: |
 | Telemetry consumed | 35,040 |
 | Predictions generated | 34,945 |
 | Completed feedback records | 34,944 |
-| Pending predictions at end | 1 |
+| Pending prediction at end | 1 |
 | Unmatched feedback events | 0 |
 | Duplicate feedback events | 0 |
 | Sequence failures | 0 |
 | Gap incidents in clean replay | 0 |
 | Invalidated predictions in clean replay | 0 |
 
-The post-training out-of-sample period contains **3,504** completed feedback records and matches the third chronological evaluation window:
+The single pending prediction is expected because the last source observation creates one forecast whose 15-minute target lies beyond the available dataset.
 
-- ML MAE: `3.2133 kWh`
-- persistence MAE: `4.2532 kWh`
-- ML MAE reduction: `24.45%`
+The post-training replay window contains 3,504 completed feedback records and reproduces the third chronological evaluation result: 3.2133 kWh ML MAE versus 4.2532 kWh persistence MAE.
 
-This is historical replay evidence, not measured production performance.
+This is historical replay evidence. It is not measured plant production performance.
 
-## Missingness and recovery
+## Missing Telemetry
 
-Injected-gap tests verify the explicit no-imputation policy.
+Injected-gap tests exercise the recovery policy. A positive gap is detected before stale state is reused. Affected pending predictions are quarantined as unscorable, feature history is reset, and the next segment must re-warm on 96 contiguous observations.
 
-When a positive gap occurs:
+There is no imputation step in this recovery path. Duplicate and out-of-order timestamps remain fail-closed.
 
-1. missing timestamps are identified;
-2. affected pending predictions are quarantined as unscorable;
-3. state is reset so pre-gap history cannot leak forward;
-4. the runtime starts a new segment;
-5. forecasting resumes only after 96 contiguous observations have re-warmed the feature state.
+Tests also cover midnight gap handling, state-reset isolation, feedback isolation, and the requirement that pre-gap values do not contaminate post-gap rolling features.
 
-Duplicate and out-of-order timestamps remain fail-closed.
+## Retraining Validation
 
-## Retraining validation
+The Q3 candidate was trained and validated using target-time partitions:
 
-The Q3 retraining workflow was validated with target-time partitioning and reproducibility checks.
+| Quantity | Result |
+| --- | ---: |
+| Training samples | 17,279 |
+| Validation samples | 8,832 |
+| Candidate MAE | 4.0639 kWh |
+| Persistence MAE | 5.4154 kWh |
+| Improvement vs persistence | 24.96% |
+| Promotion gate | ACCEPTED |
 
-- training samples: `17,279`
-- validation samples: `8,832`
-- candidate MAE: `4.0639 kWh`
-- persistence MAE: `5.4154 kWh`
-- improvement: `24.96%`
-- decision: **ACCEPTED**
+The v1 reference model was excluded for this checkpoint because its training target boundary extends into the Q3 evaluation period. Presenting that comparison would make the result in-sample.
 
-The reference v1 model was excluded from that comparison because its training target cutoff overlapped the Q3 validation period. This avoids an invalid in-sample reference comparison.
+## Test Evidence
 
-## Monitoring behavior
+A full local test run recorded **106 passed** across ingestion, replay, feature generation, temporal checks, model evaluation, operational feedback, monitoring, missingness recovery, retraining, and Streamlit UI tests.
 
-The monitoring layer is intentionally honest about regime variation. In the final historical 24-hour window, for example:
+The suite includes dedicated checks for the midnight timestamp convention, one-step target alignment, future-row protection, duplicate delivery, skipped intervals, gap recovery, target-based retraining boundaries, artifact validation, and the UI's completed-forecast feedback alignment.
 
-- ML MAE: `0.9815 kWh`
-- persistence MAE: `0.2030 kWh`
-- ML win rate: `29.17%`
+## Limitations
 
-The 7-day window was different:
+The evidence is strong for the implemented historical workflow, but it does not establish live plant deployment performance. The project uses a single site/dataset, one forecast horizon, a compact feature universe, local file artifacts, and controlled historical replay. It does not measure business impact, provide probabilistic uncertainty, or implement continuous production retraining and distributed serving.
 
-- ML MAE: `1.8664 kWh`
-- persistence MAE: `2.0194 kWh`
-- ML win rate: `34.23%`
-
-These windows are descriptive diagnostics, not tuning targets. They show why the baseline and rolling monitoring remain part of the system.
-
-## Test suite
-
-The latest full suite reports:
-
-```text
-106 passed
-0 failed
-```
-
-Coverage spans ingestion, replay, feature generation, model evaluation, operational feedback, monitoring, missingness recovery, retraining, and the Streamlit UI.
-
-## Limits of the evidence
-
-The project demonstrates a reproducible historical forecasting and ML lifecycle workflow. It does not establish:
-
-- live SCADA integration
-- plant-level deployment performance
-- network or sensor failure behavior beyond the tested simulations
-- distributed-system scalability
-- universal superiority over simple baselines across all operating regimes
-
+The recent 24-hour diagnostic also shows why point-in-time metrics should be interpreted carefully: some short windows favor persistence even when pooled chronological evidence favors ML.
