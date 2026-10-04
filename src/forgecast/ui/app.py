@@ -44,10 +44,10 @@ def main() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.caption(
-        "This system executes an event-driven 
-        replay of 15-minute industrial telemetry. Frozen model configurations, 
-        historical baselines, and source dataset parameters remain fully immutable 
-        to guarantee deterministic pipeline validation."
+        "This system executes an event-driven " 
+        "replay of 15-minute industrial telemetry. Frozen model configurations, " 
+        "historical baselines, and source dataset parameters remain fully immutable "
+        "to guarantee deterministic pipeline validation."
     )
 
     # Replay execution
