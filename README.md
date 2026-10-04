@@ -46,7 +46,9 @@ The final post-training holdout also favored ForgeCast: 3.21 kWh MAE versus 4.25
 
 Operational replay over the complete 35,040-row dataset produced 34,945 predictions and 34,944 completed feedback records. There was one expected pending prediction, with zero unmatched feedback events, zero duplicate feedback events, and zero sequence failures.
 
-The latest full local test run recorded **106 passed**.
+The full automated test suite covers nine test modules spanning telemetry contracts, temporal boundaries, causal feature generation, model behavior, monitoring, operational feedback, replay, retraining, and the Streamlit UI.
+
+Together, the evaluation and test evidence shows both sides of the project: the model improves on a strong short-horizon baseline, and the surrounding forecasting workflow is explicitly tested against the failure modes that matter for time-series ML.
 
 These are historical evaluation and replay results, not measurements from a live plant deployment.
 
