@@ -19,21 +19,15 @@ data -> model -> prediction
 ForgeCast:
 
 ```text
-telemetry
-  -> validation
-  -> causal feature generation
-  -> forecast
-  -> prediction registration
-  -> delayed ground truth
-  -> model vs baseline evaluation
-  -> monitoring
-  -> retraining candidate
-  -> versioned artifact
+telemetry -> validation -> causal features -> forecast
+-> prediction registration -> delayed ground truth
+-> baseline comparison -> monitoring -> retraining candidate
+-> versioned artifact
 ```
 
 ## Why This Project
 
-The interesting part is not only the model score. Short-horizon time-series ML can look better than it really is when future values leak into features, when random splits ignore time, or when delayed labels and missing intervals are handled loosely.
+The interesting part is not only the model score. Short-horizon time-series ML can look better than it really is when future values leak into features, random splits ignore time, or delayed labels and missing intervals are handled loosely.
 
 ForgeCast treats those as engineering problems. The implementation includes causal features, chronological holdout evaluation, a persistence baseline, exact prediction-to-ground-truth pairing, missing telemetry recovery, rolling monitoring, retraining candidate evaluation, and versioned model artifacts.
 
@@ -50,7 +44,7 @@ The frozen v1 model was evaluated on three expanding chronological holdout windo
 
 The final post-training holdout also favored ForgeCast: 3.2133 kWh MAE versus 4.2532 kWh for persistence, a 24.45% reduction across 3,504 intervals.
 
-Operational replay over the complete 35,040-row dataset produced 34,945 predictions and 34,944 completed feedback records. There was one expected pending prediction at the end, with zero unmatched feedback events, zero duplicate feedback events, and zero sequence failures.
+Operational replay over the complete 35,040-row dataset produced 34,945 predictions and 34,944 completed feedback records. There was one expected pending prediction, with zero unmatched feedback events, zero duplicate feedback events, and zero sequence failures.
 
 The latest full local test run recorded **106 passed**.
 
@@ -66,7 +60,7 @@ The ingestion layer checks the 11-field source schema, numeric and categorical v
 
 The feature generator keeps the most recent 96 contiguous Usage observations. It produces historical Usage lags and rolling means plus target-time calendar features and cyclical encodings.
 
-Target-interval physical measurements are excluded because they are not available when the forecast is made. The model also does not use the target itself as a feature.
+Target-interval physical measurements are excluded because they are not available when the forecast is made. The target itself cannot enter the feature matrix.
 
 ### 3. Forecast the next interval
 
@@ -80,11 +74,11 @@ A persistence forecast, `Usage(t)`, is recorded alongside the ML prediction so e
 
 ### 4. Wait for ground truth
 
-Predictions are not scored immediately because the target has not arrived yet. The system stores the forecast by target timestamp. When the matching telemetry record arrives, it creates a completed feedback record containing the actual value, ML forecast, persistence forecast, and both errors.
+Predictions are not scored immediately because the target has not arrived. The system stores the forecast by target timestamp. When the matching telemetry record arrives, it creates a feedback record containing the actual value, ML forecast, persistence forecast, and both errors.
 
 ### 5. Monitor performance
 
-Completed feedback updates cumulative metrics and bounded 24-hour and 7-day windows. This makes short-term changes visible without treating every short window as proof of model degradation.
+Completed feedback updates cumulative metrics and bounded 24-hour and 7-day windows. Short-window changes are visible without treating every window as proof of degradation.
 
 ### 6. Recover from missing telemetry
 
@@ -109,7 +103,7 @@ flowchart LR
     I --> J[Versioned Artifact]
 ```
 
-The detailed architecture is documented in [docs/architecture.md](docs/architecture.md), including state management, gap recovery, deployment, and the trade-offs behind the major design choices.
+The detailed [architecture document](docs/architecture.md) covers state management, gap recovery, deployment, and the trade-offs behind the major design choices.
 
 ## Key Technical Features
 
@@ -117,18 +111,18 @@ The detailed architecture is documented in [docs/architecture.md](docs/architect
 | --- | --- |
 | Leakage-safe time alignment | Prevents future target information from entering the forecast. |
 | Chronological evaluation | Tests the model on later time periods instead of randomly shuffled rows. |
-| Persistence baseline | Provides a strong and inference-available sanity check. |
+| Persistence baseline | Provides an inference-available sanity check. |
 | Stateful inference | Keeps the runtime close to a streaming forecast loop. |
 | Delayed feedback | Scores predictions only after their real targets arrive. |
 | Missingness recovery | Prevents stale pre-gap history from contaminating later features. |
-| Model-version tracking | Keeps feedback and metrics attributable to the artifact that generated them. |
+| Model-version tracking | Keeps feedback and metrics attributable to the generating artifact. |
 | Retraining gate | Evaluates candidates with explicit temporal and performance criteria. |
 
 ## Tech Stack
 
 Python · Pandas · NumPy · scikit-learn · Streamlit · pytest
 
-Captured model metadata records Python 3.13.3, NumPy 2.4.6, Pandas 3.0.3, and scikit-learn 1.9.0. The active model is stored with companion metadata that records the feature contract, training boundaries, dataset identity, and runtime versions.
+Captured model metadata records Python 3.13.3, NumPy 2.4.6, Pandas 3.0.3, and scikit-learn 1.9.0. The active model is stored with companion metadata covering the feature contract, training boundaries, dataset identity, and runtime versions.
 
 ## Quick Start
 
@@ -141,7 +135,7 @@ python -m pytest
 streamlit run streamlit_app.py
 ```
 
-Activate `.venv` with the normal command for your shell before installing packages if needed. The repository's `pyproject.toml` configures `src/` on the test path, and `streamlit_app.py` is the hosted/local entrypoint.
+Activate `.venv` with the normal command for your shell before installing packages if needed. The repository's `pyproject.toml` configures `src/` on the test path, and `streamlit_app.py` is the local and hosted entrypoint.
 
 ## Repository Structure
 
