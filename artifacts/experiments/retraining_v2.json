@@ -1,0 +1,34 @@
+{
+  "checkpoint": {
+    "name": "Q3",
+    "training_cutoff": "2018-06-30T23:45:00",
+    "eval_start": "2018-07-01T00:00:00",
+    "eval_end": "2018-09-30T23:45:00",
+    "candidate_version": "v2"
+  },
+  "decision": {
+    "status": "ACCEPTED",
+    "is_promoted": true,
+    "criteria_results": {
+      "beats_persistence_threshold": true,
+      "reference_comparison": true
+    },
+    "reasons": [
+      "Candidate MAE (4.0639) improved 24.96% vs persistence (5.4154), exceeding required 5.00% threshold"
+    ],
+    "candidate_metrics": {
+      "mae": 4.063884714781055,
+      "rmse": 8.551252240103919
+    },
+    "baseline_metrics": {
+      "mae": 5.415430253623189,
+      "rmse": 12.449175188032292
+    },
+    "reference_metrics": null,
+    "baseline_improvement_pct": 24.9573067243897,
+    "reference_improvement_pct": null
+  },
+  "metadata_path": "artifacts\\models\\forgecast_v2_candidate_metadata.json",
+  "model_path": "artifacts\\models\\forgecast_v2_candidate.pkl",
+  "created_at_utc": "2026-10-03T20:13:09.388077+00:00"
+}
