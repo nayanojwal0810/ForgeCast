@@ -37,12 +37,12 @@ The frozen v1 model was evaluated on three expanding chronological holdout windo
 
 | Metric | ForgeCast | Persistence |
 | --- | ---: | ---: |
-| Pooled MAE (mean absolute error) | **3.8626 kWh** | 5.3688 kWh |
-| Pooled RMSE (root mean squared error) | **8.2464 kWh** | 12.1538 kWh |
+| Pooled MAE | **3.86 kWh** | 5.37 kWh |
+| Pooled RMSE | **8.25 kWh** | 12.15 kWh |
 
-**Result: 28.05% lower MAE than persistence across 10,512 held-out observations.**
+**Result: 28.1% lower MAE than persistence across 10,512 chronological holdout observations.**
 
-The final post-training holdout also favored ForgeCast: 3.2133 kWh MAE versus 4.2532 kWh for persistence, a 24.45% reduction across 3,504 intervals.
+The final post-training holdout also favored ForgeCast: 3.21 kWh MAE versus 4.25 kWh for persistence, a 24.4% reduction across 3,504 intervals.
 
 Operational replay over the complete 35,040-row dataset produced 34,945 predictions and 34,944 completed feedback records. There was one expected pending prediction, with zero unmatched feedback events, zero duplicate feedback events, and zero sequence failures.
 

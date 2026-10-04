@@ -1,6 +1,6 @@
 # Model Lifecycle
 
-ForgeCast follows the model from its forecast definition through evaluation, operation, feedback, monitoring, and retraining. The important point is that the forecast is treated as an event with a future label, not as an immediate score.
+ForgeCast follows the model from its forecast definition through evaluation, operation, feedback, monitoring, and retraining. The forecast is treated as an event with a future label, not as an immediate score.
 
 ## Forecast Definition
 
@@ -40,7 +40,7 @@ The active estimator is scikit-learn `HistGradientBoostingRegressor` with frozen
 | `random_state` | `42` |
 | `early_stopping` | `False` |
 
-Disabling `early_stopping` keeps model fitting from creating a hidden internal validation split that would not respect the project's chronological evaluation design.
+Disabling `early_stopping` avoids an internal validation split that would not match the project's chronological evaluation design.
 
 ## Chronological Evaluation
 
@@ -53,31 +53,25 @@ Instead of a random split, ForgeCast uses three expanding time-ordered evaluatio
 | 3 | 3.2133 kWh | 4.2532 kWh | 24.45% |
 | **Pooled** | **3.8626 kWh** | **5.3688 kWh** | **28.05%** |
 
-The pooled comparison covers 10,512 held-out observations. Fold 3 is also the final post-training replay window for the active v1 artifact.
+The pooled comparison covers 10,512 held-out observations. Fold 3 is the final post-training holdout for the active v1 artifact.
 
 ## Operational Inference
 
-At runtime, the system validates the next telemetry record, resolves feedback for the interval that just closed, updates monitoring, advances the feature state, and generates the next prediction when the history is warm.
+At runtime, the system validates telemetry, resolves feedback for the interval that just closed, updates monitoring, advances feature state, and generates the next prediction when the history is warm.
 
 A forecast is stored before its label exists. This is why prediction registration and feedback completion are separate parts of the lifecycle.
 
 ## Delayed Feedback
 
-When the target interval arrives, the feedback tracker matches it by exact logical target timestamp. The completed record contains:
+When the target interval arrives, the feedback tracker matches it by exact logical target timestamp. The completed record contains the actual Usage, the original ML forecast, the persistence forecast, both absolute errors, and model/version context.
 
-- actual Usage;
-- the original ML forecast;
-- the persistence forecast;
-- ML absolute error and persistence absolute error;
-- the model version and temporal indices.
-
-Duplicate completed targets fail closed. Unmatched actuals are tracked rather than converted into synthetic scores. A prediction whose target falls inside a detected telemetry gap is invalidated instead of scored.
+Duplicate completed targets fail closed. Unmatched actuals are tracked rather than converted into synthetic scores. A prediction whose target falls inside a telemetry gap is invalidated instead of scored.
 
 ## Monitoring
 
 Monitoring consumes completed feedback only. It keeps cumulative metrics and bounded windows for the most recent 96 observations (about 24 hours) and 672 observations (about 7 days).
 
-Core measures include ML MAE/RMSE, persistence MAE/RMSE, MAE improvement, and ML win rate. Signed residual and error-concentration diagnostics are used for description, not for tuning the active model on the same evidence.
+Core measures include ML MAE/RMSE, persistence MAE/RMSE, MAE improvement, and ML win rate. Signed residual and error-concentration diagnostics are descriptive diagnostics, not tuning targets.
 
 ## Retraining
 
@@ -88,13 +82,13 @@ training target <= checkpoint cutoff
 validation start <= target <= validation end
 ```
 
-The Q3 candidate used a `2018-06-30 23:45` training target cutoff, 17,279 training samples, and 8,832 validation samples. Candidate MAE was 4.0639 kWh versus 5.4154 kWh for persistence, a 24.96% improvement.
+The **2018 Q3 retraining candidate** used a `2018-06-30 23:45` training target cutoff, 17,279 training samples, and 8,832 validation samples. Candidate MAE was 4.0639 kWh versus 5.4154 kWh for persistence, a 24.96% improvement.
 
 ## Candidate Evaluation and Promotion
 
 The implemented promotion policy requires at least 5.0% improvement over persistence. A reference-model comparison is used only when that reference is temporally valid; otherwise it is excluded rather than treated as evidence.
 
-The Q3 `v2` candidate passed the implemented gate and was saved as a candidate artifact. The hosted replay still uses the active `v1` artifact. Acceptance of a candidate is therefore separate from silently replacing the deployed demonstration model.
+The 2018 Q3 `v2` candidate passed the implemented promotion gate and was saved as a candidate artifact. The hosted replay continues to load the active `v1` artifact, so candidate acceptance did not silently change the current hosted model.
 
 ## Artifacts and Traceability
 

@@ -6,13 +6,15 @@ The question this document answers is: **How do we know the forecasting system i
 
 ForgeCast is checked at three levels:
 
-1. **Model performance** — does the forecast improve on a simple baseline under chronological holdout?
-2. **System correctness** — are time, feature, state, and feedback invariants enforced?
-3. **Operational behavior** — does the prediction-to-feedback loop recover cleanly from realistic delivery problems?
+1. **Model performance** — chronological holdout performance and comparison against persistence.
+2. **System correctness** — tests for feature contracts, timestamps, state, feedback, and temporal boundaries.
+3. **Operational behavior** — full historical replay and fault-injection tests for missing telemetry.
+
+Good holdout metrics support the model claim; passing lifecycle tests support the system claim; neither alone proves production readiness.
 
 ## Model Performance
 
-The active v1 configuration was evaluated on three expanding chronological windows of 3,504 observations.
+The active v1 configuration was evaluated on three expanding chronological holdout windows of 3,504 observations.
 
 | Measure | ML | Persistence |
 | --- | ---: | ---: |
@@ -23,7 +25,7 @@ Across 10,512 held-out observations, ML MAE was 28.05% lower than persistence. T
 
 The third fold is the final post-training holdout for the active v1 artifact: 3.2133 kWh MAE for ML versus 4.2532 kWh for persistence, a 24.45% reduction.
 
-These are historical out-of-sample results. They are not measurements from a live steel plant.
+These are historical out-of-sample results. They are not measurements from a live plant deployment.
 
 ## System Correctness
 
@@ -35,14 +37,9 @@ The central temporal invariant is:
 feature_source_time <= forecast_cutoff < target_time
 ```
 
-The test suite protects this invariant in several ways:
+The primary feature set uses historical Usage and target-time calendar information. Contemporaneous target-interval physical measurements are excluded, `target_usage_kwh` cannot enter the feature matrix, and feature order is checked against the canonical 19-feature contract.
 
-- the primary feature set uses historical Usage and target-time calendar information;
-- contemporaneous target-interval physical measurements are excluded;
-- `target_usage_kwh` cannot enter the model feature matrix;
-- feature order is checked against the canonical 19-feature contract;
-- training and validation partitions are separated by `target_timestamp`;
-- internal model `early_stopping` is disabled.
+Retraining partitions are separated by `target_timestamp`, and the model configuration disables internal `early_stopping`.
 
 The dataset's daily `00:00` closing-row convention is also tested because naïve timestamp sorting would break the 15-minute sequence around midnight.
 
@@ -70,19 +67,13 @@ The one pending prediction is expected: the final source row produces a forecast
 
 ## Missing Telemetry Tests
 
-Fault-injection tests remove one or more intervals from a short replay slice. The recovery path:
-
-1. detects the missing interval;
-2. quarantines predictions whose targets are unobservable;
-3. resets feature state;
-4. starts a new logical segment;
-5. waits for 96 contiguous observations before forecasting again.
+Fault-injection tests remove one or more intervals from a short replay slice. The recovery path detects the missing interval, quarantines predictions whose targets are unobservable, resets feature state, starts a new segment, and waits for 96 contiguous observations before forecasting again.
 
 No Usage value is imputed. Tests also cover duplicate and out-of-order delivery, state isolation across the gap, feedback isolation, and midnight gap handling.
 
 ## Retraining Validation
 
-The Q3 candidate was evaluated using target-time partitions:
+The 2018 Q3 candidate was evaluated using target-time partitions:
 
 | Quantity | Result |
 | --- | ---: |
@@ -101,12 +92,10 @@ The latest full local test run recorded **106 passed**. Coverage includes ingest
 
 ## Operational Diagnostics
 
-Short windows do not always favor the ML model. In the final 24-hour diagnostic, ML MAE was 0.9815 kWh while persistence was 0.2030 kWh, with an ML win rate of 29.17%. The 7-day window reversed the aggregate comparison: 1.8664 kWh ML MAE versus 2.0194 kWh for persistence.
+Short windows do not always favor the ML model. In the final 24-hour diagnostic, ML MAE was 0.9815 kWh while persistence was 0.2030 kWh, with an ML win rate of 29.17%. The 7-day window favored ML on aggregate: 1.8664 kWh MAE versus 2.0194 kWh for persistence.
 
-These diagnostics are deliberately descriptive. They are not used to tune the frozen model or redefine the evaluation set.
+These diagnostics are descriptive. They are not used to tune the frozen model or redefine the evaluation set.
 
 ## Limits of the Evidence
 
 The repository demonstrates a reproducible historical forecasting and ML lifecycle workflow. It does not prove live plant performance, distributed-system scalability, business impact, probabilistic forecast quality, or universal superiority over persistence.
-
-That distinction is important: **good holdout metrics support the model claim; passing lifecycle tests support the system claim; neither one alone proves production readiness.**
