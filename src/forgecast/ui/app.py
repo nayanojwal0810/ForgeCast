@@ -26,7 +26,7 @@ def main() -> None:
     st.title("⚡ ForgeCast")
     st.subheader("15-Minute-Ahead Industrial Energy Forecasting")
     st.markdown(
-        "A lightweight forecasting system that predicts the next 15-minute "
+        "A forecasting system that predicts the next 15-minute "
         "energy consumption interval and compares it with a simple persistence baseline."
     )
 
@@ -65,16 +65,15 @@ def main() -> None:
     st.divider()
 
     # 3. Main Forecast Result
-    st.markdown("### Latest Forecast")
-    if snapshot.latest_prediction is not None and snapshot.latest_feedback is not None:
-        pred = snapshot.latest_prediction
+    st.markdown("### Latest Completed Forecast")
+    if snapshot.latest_feedback is not None:
         fb = snapshot.latest_feedback
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("ML Forecast", f"{pred.predicted_usage_kwh:.2f} kWh")
+            st.metric("ML Forecast", f"{fb.predicted_usage_kwh:.2f} kWh")
         with col2:
-            st.metric("Persistence Baseline", f"{pred.baseline_persistence_kwh:.2f} kWh")
+            st.metric("Persistence Baseline", f"{fb.baseline_persistence_kwh:.2f} kWh")
         with col3:
             st.metric("Actual Usage", f"{fb.actual_usage_kwh:.2f} kWh")
 
@@ -89,8 +88,9 @@ def main() -> None:
                 f"⚠️ **Persistence baseline performed better on this interval** "
                 f"(Baseline Error: {fb.persistence_absolute_error:.2f} kWh vs ML Error: {fb.ml_absolute_error:.2f} kWh)"
             )
+        st.caption(f"Interval closing at: {fb.target_timestamp.strftime('%Y-%m-%d %H:%M')}")
     else:
-        st.info("Run the demo to view the latest forecast.")
+        st.info("Run the demo to view the latest completed forecast.")
 
     st.divider()
 

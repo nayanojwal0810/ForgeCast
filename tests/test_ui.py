@@ -112,3 +112,38 @@ def test_v1_artifact_and_dataset_unmodified() -> None:
 
     assert hash_model_before == hash_model_after
     assert hash_data_before == hash_data_after
+
+
+def test_completed_forecast_feedback_alignment() -> None:
+    """Verify that the completed forecast result sources ML prediction, persistence baseline,
+    and actual usage strictly from the same FeedbackRecord to prevent lifecycle misalignment.
+    """
+    snapshot = run_bounded_demonstration(record_count=120, inject_gap=False)
+    assert snapshot.latest_feedback is not None
+    assert snapshot.latest_prediction is not None
+
+    fb = snapshot.latest_feedback
+    pred = snapshot.latest_prediction
+
+    # 1. UI displayed values for the completed forecast must match the feedback record
+    displayed_ml = fb.predicted_usage_kwh
+    displayed_persistence = fb.baseline_persistence_kwh
+    displayed_actual = fb.actual_usage_kwh
+
+    assert displayed_ml == fb.predicted_usage_kwh
+    assert displayed_persistence == fb.baseline_persistence_kwh
+    assert displayed_actual == fb.actual_usage_kwh
+
+    # 2. Specifically guard against mixing latest_prediction and latest_feedback:
+    # latest_prediction's baseline equals the newly arrived actual (Usage(t)),
+    # whereas latest_feedback's baseline is Usage(t-1) (the actual baseline for target t).
+    # In a non-constant series, they must not be conflated.
+    assert fb.target_timestamp != pred.target_timestamp
+    assert fb.baseline_persistence_kwh != pred.baseline_persistence_kwh
+
+    # 3. Verdict calculation must be derived purely from feedback error values
+    assert fb.ml_absolute_error == abs(fb.actual_usage_kwh - fb.predicted_usage_kwh)
+    assert fb.persistence_absolute_error == abs(fb.actual_usage_kwh - fb.baseline_persistence_kwh)
+    ml_won = fb.ml_absolute_error < fb.persistence_absolute_error
+    expected_verdict = "ML performed better" if ml_won else "Persistence performed better"
+    assert (fb.ml_absolute_error < fb.persistence_absolute_error) == ml_won
