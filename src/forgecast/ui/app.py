@@ -44,8 +44,10 @@ def main() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.caption(
-        "This is an educational portfolio demonstration of 15-minute energy forecasting "
-        "over historical telemetry. Frozen model artifacts and raw data remain unchanged."
+        "This system executes an event-driven 
+        replay of 15-minute industrial telemetry. Frozen model configurations, 
+        historical baselines, and source dataset parameters remain fully immutable 
+        to guarantee deterministic pipeline validation."
     )
 
     # Replay execution
