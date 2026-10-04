@@ -1,4 +1,4 @@
-"""Backend demonstration service powering the operational UI without duplicating forecasting logic."""
+"""Backend demonstration service powering the ForgeCast UI."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,16 +24,20 @@ def get_repo_root() -> Path:
 
 @dataclass(frozen=True)
 class UIDataSnapshot:
-    """Consolidated operational snapshot consumed directly by the demonstration UI."""
+    """Consolidated operational snapshot consumed by the demonstration UI."""
 
     model_version: str
     model_class: str
     records_consumed: int
     is_warmed_up: bool
+    current_history_length: int
     system_state: str
     latest_logical_timestamp: datetime | None
     latest_prediction: PredictionEvent | None
     latest_feedback: FeedbackRecord | None
+    pending_prediction_count: int
+    completed_feedback_count: int
+    unmatched_feedback_count: int
     current_segment_id: int
     gap_incident_count: int
     invalidated_prediction_count: int
@@ -49,7 +53,7 @@ class UIDataSnapshot:
 def load_chronological_evaluation_summary(
     artifacts_dir: Path | str | None = None,
 ) -> dict[str, Any] | None:
-    """Read historical 3-fold chronological evaluation evidence from disk."""
+    """Read historical chronological evaluation evidence from disk."""
     base = Path(artifacts_dir) if artifacts_dir else get_repo_root() / "artifacts"
     eval_file = base / "experiments" / "chronological_evaluation_v1.json"
     if not eval_file.exists():
@@ -60,11 +64,44 @@ def load_chronological_evaluation_summary(
         pooled = data.get("pooled_results", {})
         return {
             "n_splits": data.get("n_splits", 3),
-            "total_samples": pooled.get("pooled_evaluation_sample_count", data.get("total_samples", 0)),
+            "test_size": data.get("test_size", 3504),
+            "total_samples": pooled.get(
+                "pooled_evaluation_sample_count",
+                data.get("total_samples", 0),
+            ),
             "ml_mae": pooled.get("pooled_ml_mae"),
             "ml_rmse": pooled.get("pooled_ml_rmse"),
             "persistence_mae": pooled.get("pooled_persistence_mae"),
+            "persistence_rmse": pooled.get("pooled_persistence_rmse"),
             "improvement_pct": pooled.get("pooled_ml_relative_improvement_pct"),
+            "folds": data.get("folds", []),
+        }
+    except Exception:
+        return None
+
+
+def load_active_model_summary(
+    artifacts_dir: Path | str | None = None,
+) -> dict[str, Any] | None:
+    """Read metadata for the artifact used by the hosted replay."""
+    base = Path(artifacts_dir) if artifacts_dir else get_repo_root() / "artifacts"
+    metadata_file = base / "models" / "forgecast_v1_replay_ready_metadata.json"
+    if not metadata_file.exists():
+        return None
+    try:
+        with open(metadata_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "model_version": data.get("model_version"),
+            "model_class": data.get("model_class"),
+            "training_sample_count": data.get("training_sample_count"),
+            "training_start_target": data.get("training_start_target"),
+            "training_end_target": data.get("training_end_target"),
+            "feature_count": len(data.get("feature_names", [])),
+            "python_version": data.get("python_version"),
+            "numpy_version": data.get("numpy_version"),
+            "pandas_version": data.get("pandas_version"),
+            "scikit_learn_version": data.get("scikit_learn_version"),
         }
     except Exception:
         return None
@@ -73,7 +110,7 @@ def load_chronological_evaluation_summary(
 def load_retraining_lifecycle_summary(
     artifacts_dir: Path | str | None = None,
 ) -> dict[str, Any] | None:
-    """Read latest candidate retraining evidence from disk (read-only portfolio inspection)."""
+    """Read the latest checkpoint-based retraining candidate evidence."""
     base = Path(artifacts_dir) if artifacts_dir else get_repo_root() / "artifacts"
     exp_file = base / "experiments" / "retraining_v2.json"
     if not exp_file.exists():
@@ -91,10 +128,15 @@ def load_retraining_lifecycle_summary(
             "training_cutoff": cp.get("training_cutoff"),
             "eval_start": cp.get("eval_start"),
             "eval_end": cp.get("eval_end"),
+            "evaluation_sample_count": data.get("candidate_metrics", {}).get(
+                "evaluation_sample_count"
+            ) or dec.get("evaluation_sample_count"),
             "decision_status": dec.get("status", "UNKNOWN"),
             "is_promoted": dec.get("is_promoted", False),
             "candidate_mae": cand_m.get("mae"),
+            "candidate_rmse": cand_m.get("rmse"),
             "persistence_mae": base_m.get("mae"),
+            "persistence_rmse": base_m.get("rmse"),
             "improvement_pct": dec.get("baseline_improvement_pct"),
             "created_at_utc": data.get("created_at_utc"),
         }
@@ -109,18 +151,7 @@ def run_bounded_demonstration(
     csv_path: Path | str | None = None,
     model_path: Path | str | None = None,
 ) -> UIDataSnapshot:
-    """Run a bounded telemetry replay through the operational engine and capture UI state.
-
-    Args:
-        record_count: Number of telemetry records to process.
-        inject_gap: If True, simulates missingness by dropping a single record in memory.
-        gap_record_index: Index of record to drop when inject_gap is True.
-        csv_path: Source CSV dataset path (read-only stream).
-        model_path: Trained model artifact path.
-
-    Returns:
-        UIDataSnapshot populated with live engine and monitoring state.
-    """
+    """Run a bounded historical replay through the real operational engine."""
     repo_root = get_repo_root()
     c_path = Path(csv_path) if csv_path else repo_root / "data" / "raw" / "Steel_industry_data.csv"
     m_path = (
@@ -149,7 +180,6 @@ def run_bounded_demonstration(
             break
 
         if inject_gap and idx == gap_record_index:
-            # Simulate a 1-interval missing telemetry packet in memory
             continue
 
         step_res = engine.process_telemetry(record)
@@ -176,7 +206,6 @@ def run_bounded_demonstration(
         if step_res.invalidated_predictions:
             latest_invalidated = step_res.invalidated_predictions[-1]
 
-    # Evaluate system state descriptor
     buffer_len = len(engine.feature_generator.usage_buffer)
     is_warmed_up = buffer_len >= engine.feature_generator.history_size
 
@@ -192,13 +221,20 @@ def run_bounded_demonstration(
 
     return UIDataSnapshot(
         model_version=engine.model_version,
-        model_class=engine.metadata.get("model_class", "HistGradientBoostingRegressor"),
+        model_class=engine.metadata.get(
+            "model_class",
+            "HistGradientBoostingRegressor",
+        ),
         records_consumed=engine.records_consumed,
         is_warmed_up=is_warmed_up,
+        current_history_length=buffer_len,
         system_state=system_state,
         latest_logical_timestamp=engine.last_logical_timestamp,
         latest_prediction=latest_prediction,
         latest_feedback=latest_feedback,
+        pending_prediction_count=engine.feedback_tracker.pending_count,
+        completed_feedback_count=engine.feedback_tracker.completed_count,
+        unmatched_feedback_count=engine.feedback_tracker.unmatched_count,
         current_segment_id=engine.current_segment_id,
         gap_incident_count=engine.gap_incident_count,
         invalidated_prediction_count=engine.invalidated_prediction_count,
@@ -208,5 +244,5 @@ def run_bounded_demonstration(
         rolling_24h_snapshot=summary.rolling_24h,
         rolling_7d_snapshot=summary.rolling_7d,
         cumulative_snapshot=summary.full_replay_cumulative,
-        recent_history=recent_history[-96:],  # Keep last 96 completed steps for chart
+        recent_history=recent_history[-96:],
     )
