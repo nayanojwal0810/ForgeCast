@@ -1,82 +1,88 @@
 # Validation
 
-ForgeCast is validated as a temporal ML system. The evaluation covers data contracts, causal feature construction, chronological model comparison, prediction/feedback pairing, missingness recovery, monitoring behavior, retraining boundaries, and the hosted demonstration path.
+The question this document answers is: **How do we know the forecasting system is behaving correctly, and how do we know the reported model improvement is honest?**
 
 ## Validation Scope
 
-Validation is designed to catch both model-quality errors and system-level temporal errors. The most important invariant is:
+ForgeCast is checked at three levels:
+
+1. **Model performance** — does the forecast improve on a simple baseline under chronological holdout?
+2. **System correctness** — are time, feature, state, and feedback invariants enforced?
+3. **Operational behavior** — does the prediction-to-feedback loop recover cleanly from realistic delivery problems?
+
+## Model Performance
+
+The active v1 configuration was evaluated on three expanding chronological windows of 3,504 observations.
+
+| Measure | ML | Persistence |
+| --- | ---: | ---: |
+| Pooled MAE | **3.8626 kWh** | 5.3688 kWh |
+| Pooled RMSE | **8.2464 kWh** | 12.1538 kWh |
+
+Across 10,512 held-out observations, ML MAE was 28.05% lower than persistence. The three fold-level improvements were 27.67%, 30.67%, and 24.45%.
+
+The third fold is the final post-training holdout for the active v1 artifact: 3.2133 kWh MAE for ML versus 4.2532 kWh for persistence, a 24.45% reduction.
+
+These are historical out-of-sample results. They are not measurements from a live steel plant.
+
+## System Correctness
+
+### Time and Leakage
+
+The central temporal invariant is:
 
 ```text
 feature_source_time <= forecast_cutoff < target_time
 ```
 
-A prediction uses only information logically available by its forecast cutoff. Delayed labels are handled separately after the target interval closes.
+The test suite protects this invariant in several ways:
 
-## Dataset
+- the primary feature set uses historical Usage and target-time calendar information;
+- contemporaneous target-interval physical measurements are excluded;
+- `target_usage_kwh` cannot enter the model feature matrix;
+- feature order is checked against the canonical 19-feature contract;
+- training and validation partitions are separated by `target_timestamp`;
+- internal model `early_stopping` is disabled.
 
-The project uses the UCI Steel Industry Energy Consumption dataset. The source file contains 35,040 telemetry rows at a nominal 15-minute cadence and 11 source fields.
+The dataset's daily `00:00` closing-row convention is also tested because naïve timestamp sorting would break the 15-minute sequence around midnight.
 
-The implementation preserves source row order and applies a logical timestamp rule for the daily `00:00` closing record so that the 15-minute sequence remains continuous across midnight. This avoids corrupting the sequence by naively sorting the raw clock values.
+### State and Feedback
 
-## Leakage Controls
+The feature generator requires 96 contiguous observations before the first prediction. Pending forecasts are matched to actuals by exact target timestamp. Duplicate and out-of-order delivery is rejected.
 
-Several controls are enforced in code and tested explicitly:
+## Operational Behavior
 
-- Contemporaneous target-interval electrical measurements and target-derived CO2 are excluded from the primary 15-minute feature contract.
-- The primary feature set uses historical Usage lags/rollups and calendar information known for the target interval.
-- The stateful generator requires 96 contiguous observations before the first forecast.
-- The model wrapper rejects missing, extra, or misordered features and rejects target leakage through `target_usage_kwh`.
-- Retraining partitions are defined by `target_timestamp`, with explicit checks for temporal separation and disjoint train/validation target sets.
-- The model configuration disables internal `early_stopping` so model fitting does not introduce a hidden non-chronological split.
+A clean replay of the complete 35,040-row dataset produced:
 
-These controls are structural. They do not depend on test-set performance to choose features or hyperparameters.
-
-## Chronological Evaluation
-
-The frozen v1 model was evaluated over three expanding chronological windows of 3,504 observations each.
-
-| Fold | ML MAE | Persistence MAE | ML MAE reduction |
-| --- | ---: | ---: | ---: |
-| 1 | 3.7735 kWh | 5.2173 kWh | 27.67% |
-| 2 | 4.6011 kWh | 6.6360 kWh | 30.67% |
-| 3 | 3.2133 kWh | 4.2532 kWh | 24.45% |
-| **Pooled** | **3.8626 kWh** | **5.3688 kWh** | **28.05%** |
-
-The pooled result covers 10,512 held-out observations. The third fold is also the post-training replay window for the active v1 artifact.
-
-## Operational Validation
-
-A full historical replay exercised the prediction-to-feedback lifecycle over all 35,040 telemetry records.
-
-| Operational result | Count |
+| Operational check | Result |
 | --- | ---: |
 | Telemetry consumed | 35,040 |
 | Predictions generated | 34,945 |
-| Completed feedback records | 34,944 |
-| Pending prediction at end | 1 |
+| Completed feedback | 34,944 |
+| Pending at end | 1 |
 | Unmatched feedback events | 0 |
 | Duplicate feedback events | 0 |
 | Sequence failures | 0 |
-| Gap incidents in clean replay | 0 |
-| Invalidated predictions in clean replay | 0 |
+| Gap incidents | 0 |
+| Invalidated predictions | 0 |
 
-The single pending prediction is expected because the last source observation creates one forecast whose 15-minute target lies beyond the available dataset.
+The one pending prediction is expected: the final source row produces a forecast for a target interval that is outside the available dataset.
 
-The post-training replay window contains 3,504 completed feedback records and reproduces the third chronological evaluation result: 3.2133 kWh ML MAE versus 4.2532 kWh persistence MAE.
+## Missing Telemetry Tests
 
-This is historical replay evidence. It is not measured plant production performance.
+Fault-injection tests remove one or more intervals from a short replay slice. The recovery path:
 
-## Missing Telemetry
+1. detects the missing interval;
+2. quarantines predictions whose targets are unobservable;
+3. resets feature state;
+4. starts a new logical segment;
+5. waits for 96 contiguous observations before forecasting again.
 
-Injected-gap tests exercise the recovery policy. A positive gap is detected before stale state is reused. Affected pending predictions are quarantined as unscorable, feature history is reset, and the next segment must re-warm on 96 contiguous observations.
-
-There is no imputation step in this recovery path. Duplicate and out-of-order timestamps remain fail-closed.
-
-Tests also cover midnight gap handling, state-reset isolation, feedback isolation, and the requirement that pre-gap values do not contaminate post-gap rolling features.
+No Usage value is imputed. Tests also cover duplicate and out-of-order delivery, state isolation across the gap, feedback isolation, and midnight gap handling.
 
 ## Retraining Validation
 
-The Q3 candidate was trained and validated using target-time partitions:
+The Q3 candidate was evaluated using target-time partitions:
 
 | Quantity | Result |
 | --- | ---: |
@@ -84,19 +90,23 @@ The Q3 candidate was trained and validated using target-time partitions:
 | Validation samples | 8,832 |
 | Candidate MAE | 4.0639 kWh |
 | Persistence MAE | 5.4154 kWh |
-| Improvement vs persistence | 24.96% |
-| Promotion gate | ACCEPTED |
+| Improvement | 24.96% |
+| Gate result | **ACCEPTED** |
 
-The v1 reference model was excluded for this checkpoint because its training target boundary extends into the Q3 evaluation period. Presenting that comparison would make the result in-sample.
+The existing v1 artifact was not used as a reference for this Q3 comparison because its training target boundary overlaps the Q3 evaluation period. Treating it as a reference would make the comparison in-sample.
 
-## Test Evidence
+## Automated Tests
 
-A full local test run recorded **106 passed** across ingestion, replay, feature generation, temporal checks, model evaluation, operational feedback, monitoring, missingness recovery, retraining, and Streamlit UI tests.
+The latest full local test run recorded **106 passed**. Coverage includes ingestion contracts, replay order, temporal boundaries, feature generation, model validation, operational feedback, monitoring, missing-data recovery, retraining, and Streamlit UI behavior.
 
-The suite includes dedicated checks for the midnight timestamp convention, one-step target alignment, future-row protection, duplicate delivery, skipped intervals, gap recovery, target-based retraining boundaries, artifact validation, and the UI's completed-forecast feedback alignment.
+## Operational Diagnostics
 
-## Limitations
+Short windows do not always favor the ML model. In the final 24-hour diagnostic, ML MAE was 0.9815 kWh while persistence was 0.2030 kWh, with an ML win rate of 29.17%. The 7-day window reversed the aggregate comparison: 1.8664 kWh ML MAE versus 2.0194 kWh for persistence.
 
-The evidence is strong for the implemented historical workflow, but it does not establish live plant deployment performance. The project uses a single site/dataset, one forecast horizon, a compact feature universe, local file artifacts, and controlled historical replay. It does not measure business impact, provide probabilistic uncertainty, or implement continuous production retraining and distributed serving.
+These diagnostics are deliberately descriptive. They are not used to tune the frozen model or redefine the evaluation set.
 
-The recent 24-hour diagnostic also shows why point-in-time metrics should be interpreted carefully: some short windows favor persistence even when pooled chronological evidence favors ML.
+## Limits of the Evidence
+
+The repository demonstrates a reproducible historical forecasting and ML lifecycle workflow. It does not prove live plant performance, distributed-system scalability, business impact, probabilistic forecast quality, or universal superiority over persistence.
+
+That distinction is important: **good holdout metrics support the model claim; passing lifecycle tests support the system claim; neither one alone proves production readiness.**

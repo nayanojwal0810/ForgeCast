@@ -1,105 +1,105 @@
 # Model Lifecycle
 
-ForgeCast treats the forecast model as a versioned artifact moving through a controlled loop: define the forecast contract, build features causally, evaluate chronologically, operate with delayed feedback, monitor against a simple baseline, and evaluate retraining candidates without silently replacing the active artifact.
+ForgeCast follows the model from its forecast definition through evaluation, operation, feedback, monitoring, and retraining. The important point is that the forecast is treated as an event with a future label, not as an immediate score.
 
-## Forecast Contract
-
-The prediction task is fixed:
+## Forecast Definition
 
 ```text
-telemetry available through t -> forecast Usage(t + 15 min)
+Telemetry available through t
+        ↓
+Forecast Usage(t + 15 min)
+        ↓
+Receive actual Usage(t + 15 min)
+        ↓
+Compute ML vs persistence error
 ```
 
-The target is always one 15-minute interval ahead. Each `PredictionEvent` stores the origin timestamp, target timestamp, prediction timestamp, model version, ML forecast, and persistence baseline. The target timestamp must equal the origin plus 15 minutes.
+The forecast horizon is fixed at 15 minutes. The prediction object records the origin time, target time, model version, model output, persistence baseline, and feature provenance.
 
-The primary model uses 19 features: historical Usage lags and rolling Usage statistics plus target-time calendar variables and cyclical encodings. Contemporaneous target-interval physical measurements are not used because they are unavailable at the forecast cutoff. `Load_Type` is outside the primary feature contract.
+## Feature Generation
 
-## Feature and Model Pipeline
+The stateful feature generator requires 96 contiguous observations before it produces the first feature vector. The active feature contract contains 19 values:
 
-The feature generator maintains 96 contiguous Usage observations in memory. It emits no feature vector until warm-up is complete. The resulting features are validated against a fixed canonical column order before fitting or inference.
+- historical Usage lags and rolling means;
+- target-time hour, quarter slot, day-of-week, weekend, month, and seconds-from-midnight features;
+- cyclical encodings for time of day, day of week, and month.
 
-The active estimator is scikit-learn `HistGradientBoostingRegressor` with frozen hyperparameters:
+Target-interval physical measurements are excluded because they are not available when the forecast is made. `Load_Type` is also outside the primary model contract.
 
-- `loss="squared_error"`
-- `learning_rate=0.05`
-- `max_iter=200`
-- `max_leaf_nodes=31`
-- `l2_regularization=1.0`
-- `random_state=42`
-- `early_stopping=False`
+## Training
 
-`early_stopping=False` removes an internal non-chronological validation split from model fitting.
+The active estimator is scikit-learn `HistGradientBoostingRegressor` with frozen settings:
 
-## Offline Evaluation
+| Parameter | Value |
+| --- | --- |
+| `loss` | `squared_error` |
+| `learning_rate` | `0.05` |
+| `max_iter` | `200` |
+| `max_leaf_nodes` | `31` |
+| `l2_regularization` | `1.0` |
+| `random_state` | `42` |
+| `early_stopping` | `False` |
 
-Model evaluation is chronological rather than random. Three expanding training/evaluation windows each contain 3,504 held-out observations. Persistence is the primary baseline because it is directly available from the forecast origin:
+Disabling `early_stopping` keeps model fitting from creating a hidden internal validation split that would not respect the project's chronological evaluation design.
 
-```text
-persistence forecast = Usage(t)
-```
+## Chronological Evaluation
 
-The frozen v1 artifact achieved:
+Instead of a random split, ForgeCast uses three expanding time-ordered evaluation windows. Each window contains 3,504 held-out observations.
 
-| Metric | ML | Persistence |
-| --- | ---: | ---: |
-| Pooled MAE | 3.8626 kWh | 5.3688 kWh |
-| Pooled RMSE | 8.2464 kWh | 12.1538 kWh |
+| Fold | ML MAE | Persistence MAE | ML improvement |
+| --- | ---: | ---: | ---: |
+| 1 | 3.7735 kWh | 5.2173 kWh | 27.67% |
+| 2 | 4.6011 kWh | 6.6360 kWh | 30.67% |
+| 3 | 3.2133 kWh | 4.2532 kWh | 24.45% |
+| **Pooled** | **3.8626 kWh** | **5.3688 kWh** | **28.05%** |
 
-Across the 10,512 pooled held-out observations, ML MAE was 28.05% lower than persistence.
-
-The final chronological window also provides the clearest post-training evidence: 3,504 held-out intervals with ML MAE of 3.2133 kWh versus 4.2532 kWh for persistence, a 24.45% reduction.
+The pooled comparison covers 10,512 held-out observations. Fold 3 is also the final post-training replay window for the active v1 artifact.
 
 ## Operational Inference
 
-The runtime loop is:
+At runtime, the system validates the next telemetry record, resolves feedback for the interval that just closed, updates monitoring, advances the feature state, and generates the next prediction when the history is warm.
 
-```text
-validate telemetry
-    -> resolve prior prediction feedback
-    -> update monitoring
-    -> update feature state
-    -> generate next-target features
-    -> predict
-    -> register PredictionEvent
-```
-
-A prediction is not scored immediately because the target is not yet known. The runtime therefore separates prediction registration from feedback completion.
+A forecast is stored before its label exists. This is why prediction registration and feedback completion are separate parts of the lifecycle.
 
 ## Delayed Feedback
 
-When the next target telemetry arrives, `DelayedFeedbackTracker` searches by exact logical `target_timestamp`. A successful match becomes a `FeedbackRecord` containing the actual Usage, ML forecast, persistence baseline, and both absolute errors.
+When the target interval arrives, the feedback tracker matches it by exact logical target timestamp. The completed record contains:
 
-Duplicate completed targets fail closed. Unmatched actuals are tracked rather than converted into synthetic model scores. Predictions whose target falls inside a detected telemetry gap are quarantined and never enter the metric accumulators.
+- actual Usage;
+- the original ML forecast;
+- the persistence forecast;
+- ML absolute error and persistence absolute error;
+- the model version and temporal indices.
+
+Duplicate completed targets fail closed. Unmatched actuals are tracked rather than converted into synthetic scores. A prediction whose target falls inside a detected telemetry gap is invalidated instead of scored.
 
 ## Monitoring
 
-Monitoring consumes only completed feedback. It maintains cumulative metrics plus bounded 24-hour and 7-day windows, corresponding to 96 and 672 fifteen-minute observations.
+Monitoring consumes completed feedback only. It keeps cumulative metrics and bounded windows for the most recent 96 observations (about 24 hours) and 672 observations (about 7 days).
 
-Tracked quantities include ML MAE/RMSE, persistence MAE/RMSE, relative improvement, ML win rate, model version, and target-time bounds. Signed residual and error-concentration diagnostics are descriptive diagnostics, not automated tuning objectives.
+Core measures include ML MAE/RMSE, persistence MAE/RMSE, MAE improvement, and ML win rate. Signed residual and error-concentration diagnostics are used for description, not for tuning the active model on the same evidence.
 
-The active model's training target boundary is also recorded so that post-training performance can be separated from full-replay historical performance.
+## Retraining
 
-## Retraining and Promotion
+Retraining is checkpoint-based rather than continuously automatic. Samples are partitioned by `target_timestamp`:
 
-Retraining is organized around explicit historical checkpoints. A sample enters training only when its `target_timestamp` is at or before the checkpoint cutoff. Validation samples must fall inside the subsequent target-time evaluation window.
+```text
+training target <= checkpoint cutoff
+validation start <= target <= validation end
+```
 
-The Q3 candidate run used:
+The Q3 candidate used a `2018-06-30 23:45` training target cutoff, 17,279 training samples, and 8,832 validation samples. Candidate MAE was 4.0639 kWh versus 5.4154 kWh for persistence, a 24.96% improvement.
 
-- training cutoff: `2018-06-30 23:45`
-- training samples: 17,279
-- validation samples: 8,832
-- candidate MAE: 4.0639 kWh
-- persistence MAE: 5.4154 kWh
-- improvement vs persistence: 24.96%
+## Candidate Evaluation and Promotion
 
-The promotion policy requires at least 5.0% improvement over persistence and permits no regression against a valid reference model. When the existing v1 artifact would be an in-sample reference for the Q3 window, that reference comparison is explicitly excluded.
+The implemented promotion policy requires at least 5.0% improvement over persistence. A reference-model comparison is used only when that reference is temporally valid; otherwise it is excluded rather than treated as evidence.
 
-The Q3 candidate passed the implemented promotion gate and is stored as `v2` candidate evidence. It does not replace the active v1 artifact used by the hosted replay.
+The Q3 `v2` candidate passed the implemented gate and was saved as a candidate artifact. The hosted replay still uses the active `v1` artifact. Acceptance of a candidate is therefore separate from silently replacing the deployed demonstration model.
 
-## Model Artifacts
+## Artifacts and Traceability
 
-The active artifact is `artifacts/models/forgecast_v1_replay_ready.pkl` with companion metadata. Metadata records the model version, feature contract, training boundaries, training sample count, dataset identity, and runtime versions.
+The active model is stored as `artifacts/models/forgecast_v1_replay_ready.pkl` with companion metadata. The metadata records model version, feature contract, training boundaries, training sample count, dataset identity, and runtime versions.
 
-Candidate artifacts follow the same pattern and are kept separately. Predictions retain the generating model version, supporting later attribution and lifecycle analysis.
+Candidate models use the same artifact-plus-metadata pattern. Because predictions carry their model version, later feedback can be traced back to the artifact that generated it.
 
-The current system is a controlled historical lifecycle workflow, not a claim of continuous automated retraining or enterprise model serving.
+The current lifecycle is a controlled historical workflow. It demonstrates candidate evaluation and model traceability, but it is not continuous production retraining.

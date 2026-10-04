@@ -1,78 +1,71 @@
 # Architecture
 
-ForgeCast is a stateful forecasting pipeline for one-step-ahead industrial energy prediction. It keeps the prediction contract, feature state, delayed feedback, monitoring, and model artifacts under one temporal flow.
+ForgeCast is built as a temporal system rather than a single model script. The same core flow is used for historical replay, operational inference, delayed feedback, monitoring, and candidate retraining.
 
 ## System Overview
 
 ```mermaid
 flowchart LR
-    A[Telemetry / Historical Replay] --> B[Schema + Domain Validation]
-    B --> C[Temporal Continuity Check]
-    C --> D[Stateful Feature Generator]
-    D --> E[15-Minute Forecast]
-    E --> F[Prediction Event]
-    F --> G[Delayed Actual Feedback]
-    G --> H[Residual + Baseline Metrics]
-    H --> I[Monitoring]
-    I --> J[Retraining Candidate]
-    J --> K[Versioned Artifact]
+    A[Telemetry / Replay] --> B[Validation]
+    B --> C[Stateful Features]
+    C --> D[15-Minute Forecast]
+    D --> E[Prediction Registration]
+    E --> F[Delayed Ground Truth]
+    F --> G[Feedback + Residuals]
+    G --> H[Monitoring]
+    H --> I[Retraining Candidate]
+    I --> J[Versioned Model Artifact]
 ```
 
-The Streamlit application is a demonstration layer on top of this runtime. It delegates prediction and monitoring calculations to the same core components used by replay and operational tests.
+Every forecast follows one simple rule: telemetry through time `t` is used to predict `Usage(t + 15 min)`. The target is scored only after that future interval arrives.
 
 ## Runtime Flow
 
-The system processes telemetry in timestamp order. Each accepted record is validated before it enters model state. After the feature generator has accumulated 96 contiguous observations, it can create the feature vector for the next 15-minute target.
-
-For an observation at time `t`, the contract is:
-
-```text
-telemetry through t
-    -> forecast Usage(t + 15 min)
-    -> later receive actual Usage(t + 15 min)
-```
-
-The prediction event stores the model version, origin and target timestamps, prediction timestamp, forecast value, persistence baseline, and feature provenance. When the target record arrives, the feedback tracker pairs it by exact logical target timestamp.
+1. **Validate input.** The ingestion layer checks the source schema, numeric ranges, categories, timestamp format, and 15-minute continuity.
+2. **Build state.** The feature generator keeps the latest 96 contiguous Usage observations. No prediction is emitted until this history is warm.
+3. **Forecast.** The frozen `HistGradientBoostingRegressor` receives the canonical 19-feature vector. A persistence value, `Usage(t)`, is recorded beside the model forecast.
+4. **Complete feedback.** The next target record is matched to the earlier prediction by exact logical target timestamp.
+5. **Monitor.** Completed pairs produce ML and persistence errors, cumulative metrics, and bounded 24-hour/7-day windows.
+6. **Evaluate retraining.** Historical checkpoints build a new candidate from target-time-separated data and apply the promotion policy.
 
 ## Core Components
 
-| Component | Responsibility |
+| Component | Role |
 | --- | --- |
-| Ingestion | Validate the 11-field telemetry schema, value domains, categories, and logical timestamp semantics. |
-| Replay | Stream historical CSV rows sequentially through the validation contract; configurable delay supports demonstration replay. |
-| Features | Maintain a bounded 96-observation Usage history and generate causal Usage + Calendar features for the next target. |
-| Model | Run the frozen `HistGradientBoostingRegressor` under the canonical 19-feature contract. |
-| Operational Engine | Orchestrate continuity checks, delayed feedback, feature state, inference, and prediction registration. |
-| Monitoring | Compute cumulative, 24-hour, and 7-day ML-vs-persistence metrics from completed feedback only. |
-| Retraining | Build chronological candidate datasets, evaluate candidates against persistence, and apply promotion gates. |
-| Streamlit | Provide a bounded browser demonstration of the implemented forecasting lifecycle. |
+| `ingestion` | Enforces the 11-field source contract and normalizes the dataset's midnight convention. |
+| `replay` | Streams the CSV sequentially so historical data follows the same temporal path as inference. |
+| `features` | Maintains the 96-step state and builds causal Usage + Calendar features. |
+| `models` | Wraps the frozen estimator and serializes the active/candidate artifacts with metadata. |
+| `operational` | Connects continuity checks, feedback pairing, stateful features, inference, and event registration. |
+| `monitoring` | Compares ML with persistence using completed feedback only. |
+| `retraining` | Creates chronological candidates, validates boundaries, and applies the promotion gate. |
+| `ui` | Runs a bounded Streamlit demonstration on top of the core runtime. |
 
 ## State and Data Flow
 
-The feature generator keeps a strict in-memory buffer of the most recent 96 Usage observations. The longest historical input is `usage_lag_95`, and `usage_roll_mean_96` uses the same contiguous state.
+The feature generator stores a bounded history of 96 Usage values and their logical timestamps. The longest lag and 24-hour rolling mean both depend on this contiguous state.
 
-The operational engine keeps pending predictions keyed by target timestamp. A completed `FeedbackRecord` contains the observed target, the ML forecast, the persistence baseline, and both absolute errors. Model-version information travels with the record so monitoring remains isolated by artifact version.
+Pending forecasts are keyed by target timestamp. Once actual telemetry arrives, the tracker creates a `FeedbackRecord` containing the actual Usage, the original ML forecast, the persistence baseline, and both absolute errors. The model version stays attached to the record so monitoring can keep versions separate.
 
-## Data Quality and Recovery
+## Missing Data and Recovery
 
-Schema and temporal validation fail closed on malformed values, duplicate timestamps, out-of-order records, and invalid cadence. The operational layer can recover from positive gaps when enabled.
+Duplicate and out-of-order records are rejected before they can corrupt state. A positive gap can use the recovery path instead of stopping the replay.
 
-The recovery policy does not impute missing energy measurements. Affected pending predictions are quarantined as unscorable, feature state is reset, and a new segment must collect 96 contiguous observations before forecasting resumes. This prevents stale pre-gap history from entering post-gap lag and rolling features.
+When a gap occurs, predictions whose targets fall inside the missing interval are marked unscorable, not scored as errors. Feature history is then reset. The next segment must collect 96 contiguous observations before forecasting resumes. The system does not impute missing Usage values.
 
 ## Deployment
 
-The hosted demonstration uses Streamlit Community Cloud with `streamlit_app.py` as the repository entrypoint. Runtime files are resolved from repository-relative paths. The application loads the active v1 model artifact and reads stored evaluation/retraining summaries for presentation.
+The hosted demo is launched through the repository-level `streamlit_app.py` entrypoint. The UI reads repository-relative artifacts and delegates forecast and monitoring logic to the `forgecast` package.
 
-The design intentionally uses local files and in-memory state. It does not depend on Kafka, Spark, Kubernetes, a database, a separate API service, or a background worker. Those systems are outside the scope of this workload and evidence.
+The runtime intentionally stays lightweight: local files, in-memory state, and a single Streamlit process. Kafka, Spark, Kubernetes, a database, and a separate model-serving API are outside the demonstrated scope.
 
-## Key Design Decisions
+## Major Design Decisions
 
-**Target-time alignment.** Training and validation partitions are defined by `target_timestamp`, not by the forecast origin. This prevents a one-step boundary sample from training on a future validation target.
-
-**Causal state.** Feature generation consumes only telemetry that has logically arrived by the forecast cutoff, plus deterministic calendar properties of the target interval.
-
-**No post-gap imputation.** Missing intervals invalidate affected predictions and force a state reset/re-warm instead of fabricating history.
-
-**Active/candidate separation.** The active v1 artifact is immutable in the replay path. Later candidates are stored and evaluated separately.
-
-**Artifact-based delivery.** Model binaries have companion metadata for version, feature contract, training boundary, data identity, and runtime versions.
+| Decision | Why | Trade-off |
+| --- | --- | --- |
+| **Partition by target time** | A one-step sample can have an origin before the boundary while its ground truth is already in the next evaluation window. Target-time splits prevent that leakage. | Less intuitive than a simple origin-time split, so the boundary must be documented carefully. |
+| **Stateful causal features** | The runtime can only use information available at the forecast cutoff. A bounded state also matches how a streaming forecaster would behave. | The first 95 records are warm-up and gaps require re-warm. |
+| **Persistence baseline** | It is available at prediction time and gives a strong sanity check for short-horizon demand forecasting. | Beating persistence does not prove value in every regime. |
+| **No gap imputation** | Fabricating missing Usage would create artificial history and can contaminate downstream features. | Forecasting pauses after a gap until state is trustworthy again. |
+| **Separate active and candidate artifacts** | A retraining experiment should not silently change the hosted model. | Candidate acceptance still requires an explicit model-selection decision. |
+| **File-based artifacts with metadata** | This keeps the project reproducible and simple to run. | It is not a substitute for a shared production model registry. |
