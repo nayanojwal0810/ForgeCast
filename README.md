@@ -1,97 +1,147 @@
 # ForgeCast
 
-**15-minute-ahead industrial energy forecasting with leakage-safe time-series evaluation and an operational ML lifecycle.**
+**15-minute-ahead industrial energy forecasting built as an end-to-end ML system, not just a model.**
 
 [Live Demo](https://forgecast.streamlit.app/) · [Architecture](docs/architecture.md) · [Model Lifecycle](docs/model_lifecycle.md) · [Validation](docs/validation.md)
 
 ## Overview
 
-ForgeCast predicts the next 15-minute `Usage_kWh` value from historical industrial telemetry. The project is deliberately built as more than a notebook model: incoming records are validated, causal features are generated from state, forecasts are registered as events, later ground truth is paired back to those predictions, and the resulting residuals feed monitoring and retraining evaluation.
+ForgeCast predicts the next 15-minute industrial energy consumption value from historical telemetry. It validates each record, builds features using only information available at forecast time, produces a forecast, waits for the real target value, compares the forecast with a persistence baseline, and feeds the result into monitoring and retraining evaluation.
 
-The implementation uses the UCI Steel Industry Energy Consumption dataset and a frozen scikit-learn `HistGradientBoostingRegressor`. The hosted interface provides a bounded historical replay so the same operational flow can be demonstrated in a browser.
+The project uses the UCI Steel Industry Energy Consumption dataset and a frozen scikit-learn `HistGradientBoostingRegressor`. The hosted Streamlit app runs a bounded historical replay through the same core runtime used by the tests.
 
-## Problem
+Typical forecasting project:
 
-Short-horizon energy forecasting is easy to make look accurate when future information leaks into the feature set or when a random train/test split ignores time. Industrial telemetry also arrives as a sequence: missing intervals, duplicate messages, delayed labels, and state carried across observations all affect whether a forecast can be trusted.
+```text
+data -> model -> prediction
+```
 
-ForgeCast treats temporal correctness as part of the ML problem. A forecast at time `t` must use information available by the forecast cutoff and target `Usage(t + 15 min)`. A simple persistence forecast is retained as a baseline so model improvement is measured against a reference that is available at inference time.
+ForgeCast:
 
-## Solution
+```text
+telemetry
+  -> validation
+  -> causal feature generation
+  -> forecast
+  -> prediction registration
+  -> delayed ground truth
+  -> model vs baseline evaluation
+  -> monitoring
+  -> retraining candidate
+  -> versioned artifact
+```
 
-ForgeCast uses a 96-observation stateful feature buffer. The primary 19-feature contract combines historical Usage lags and rolling statistics with target-time calendar features. Contemporaneous target-interval physical measurements and target-derived CO2 are excluded from the primary contract.
+## Why This Project
 
-The runtime separates prediction from feedback. A forecast is stored against its target timestamp and is scored only when the actual target telemetry arrives. Positive telemetry gaps trigger explicit recovery: affected predictions are quarantined, state is reset, and the feature buffer must re-warm before forecasting resumes. No missing energy values are imputed in this path.
+The interesting part is not only the model score. Short-horizon time-series ML can look better than it really is when future values leak into features, when random splits ignore time, or when delayed labels and missing intervals are handled loosely.
 
-Retraining uses target-time partitions and an objective promotion gate. Candidate artifacts are stored separately from the active v1 replay artifact.
+ForgeCast treats those as engineering problems. The implementation includes causal features, chronological holdout evaluation, a persistence baseline, exact prediction-to-ground-truth pairing, missing telemetry recovery, rolling monitoring, retraining candidate evaluation, and versioned model artifacts.
 
-## System Overview
+## Key Results
+
+The frozen v1 model was evaluated on three expanding chronological holdout windows, each containing 3,504 observations.
+
+| Metric | ForgeCast | Persistence |
+| --- | ---: | ---: |
+| Pooled MAE (mean absolute error) | **3.8626 kWh** | 5.3688 kWh |
+| Pooled RMSE (root mean squared error) | **8.2464 kWh** | 12.1538 kWh |
+
+**Result: 28.05% lower MAE than persistence across 10,512 held-out observations.**
+
+The final post-training holdout also favored ForgeCast: 3.2133 kWh MAE versus 4.2532 kWh for persistence, a 24.45% reduction across 3,504 intervals.
+
+Operational replay over the complete 35,040-row dataset produced 34,945 predictions and 34,944 completed feedback records. There was one expected pending prediction at the end, with zero unmatched feedback events, zero duplicate feedback events, and zero sequence failures.
+
+The latest full local test run recorded **106 passed**.
+
+These are historical evaluation and replay results. They are not measurements from a live plant deployment.
+
+## How It Works
+
+### 1. Validate telemetry
+
+The ingestion layer checks the 11-field source schema, numeric and categorical values, timestamp format, and 15-minute continuity. The dataset's daily `00:00` closing-row convention is mapped to a continuous logical timeline.
+
+### 2. Build causal features
+
+The feature generator keeps the most recent 96 contiguous Usage observations. It produces historical Usage lags and rolling means plus target-time calendar features and cyclical encodings.
+
+Target-interval physical measurements are excluded because they are not available when the forecast is made. The model also does not use the target itself as a feature.
+
+### 3. Forecast the next interval
+
+The active model is a frozen `HistGradientBoostingRegressor`. The forecast target is always:
+
+```text
+Usage(t + 15 min)
+```
+
+A persistence forecast, `Usage(t)`, is recorded alongside the ML prediction so every evaluation compares against a baseline available at inference time.
+
+### 4. Wait for ground truth
+
+Predictions are not scored immediately because the target has not arrived yet. The system stores the forecast by target timestamp. When the matching telemetry record arrives, it creates a completed feedback record containing the actual value, ML forecast, persistence forecast, and both errors.
+
+### 5. Monitor performance
+
+Completed feedback updates cumulative metrics and bounded 24-hour and 7-day windows. This makes short-term changes visible without treating every short window as proof of model degradation.
+
+### 6. Recover from missing telemetry
+
+When a positive telemetry gap occurs, affected predictions are marked unscorable. Feature state is reset and the next segment must collect 96 contiguous observations before forecasting resumes. Missing Usage values are not imputed.
+
+### 7. Evaluate retraining candidates
+
+Candidate models are trained and validated using `target_timestamp` boundaries. A candidate must beat persistence by at least 5.0% to pass the implemented baseline gate. Candidate artifacts are kept separate from the active v1 artifact.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[Telemetry Replay] --> B[Validation]
-    B --> C[Stateful Features]
-    C --> D[15-Min Forecast]
+    A[Telemetry / Replay] --> B[Validation]
+    B --> C[Causal Features]
+    C --> D[15-Minute Forecast]
     D --> E[Prediction Event]
     E --> F[Delayed Ground Truth]
-    F --> G[Residual + Baseline Metrics]
+    F --> G[Error + Baseline Comparison]
     G --> H[Monitoring]
     H --> I[Retraining Candidate]
     I --> J[Versioned Artifact]
 ```
 
-## Key Capabilities
+The detailed architecture is documented in [docs/architecture.md](docs/architecture.md), including state management, gap recovery, deployment, and the trade-offs behind the major design choices.
 
-| Capability | What it demonstrates |
+## Key Technical Features
+
+| Feature | Why it matters |
 | --- | --- |
-| Data contract | Exact schema, numeric/categorical validation, logical timestamp handling, and cadence checks. |
-| Causal features | Bounded 96-step Usage history with target-time calendar features. |
-| Leakage-safe evaluation | Expanding chronological windows with a persistence baseline. |
-| Operational inference | Stateful prediction registration and exact target-time feedback pairing. |
-| Missingness recovery | Gap detection, pending-prediction quarantine, state reset, and re-warm. |
-| Monitoring | Cumulative, 24-hour, and 7-day ML-vs-persistence metrics from completed feedback. |
-| Retraining | Target-time candidate partitions, promotion gates, and separate candidate artifacts. |
-| Hosted demo | Streamlit browser interface using repository artifacts and the operational engine. |
-
-## Results
-
-The frozen v1 model was evaluated on three chronological held-out windows of 3,504 observations each.
-
-| Evidence | ML MAE | Persistence MAE | ML MAE reduction | Observations |
-| --- | ---: | ---: | ---: | ---: |
-| Pooled chronological evaluation | 3.8626 kWh | 5.3688 kWh | **28.05%** | 10,512 |
-| Post-training replay window | 3.2133 kWh | 4.2532 kWh | **24.45%** | 3,504 |
-
-The second row corresponds to the final chronological holdout after the v1 training boundary. These numbers are historical out-of-sample replay results, not production plant performance.
-
-The operational smoke replay processed all 35,040 source records and produced 34,945 predictions, 34,944 completed feedback records, one expected pending prediction, zero unmatched feedback events, zero duplicate feedback events, and zero sequence failures on the clean dataset.
+| Leakage-safe time alignment | Prevents future target information from entering the forecast. |
+| Chronological evaluation | Tests the model on later time periods instead of randomly shuffled rows. |
+| Persistence baseline | Provides a strong and inference-available sanity check. |
+| Stateful inference | Keeps the runtime close to a streaming forecast loop. |
+| Delayed feedback | Scores predictions only after their real targets arrive. |
+| Missingness recovery | Prevents stale pre-gap history from contaminating later features. |
+| Model-version tracking | Keeps feedback and metrics attributable to the artifact that generated them. |
+| Retraining gate | Evaluates candidates with explicit temporal and performance criteria. |
 
 ## Tech Stack
 
 Python · Pandas · NumPy · scikit-learn · Streamlit · pytest
 
-The captured artifact environment uses Python 3.13.3, NumPy 2.4.6, Pandas 3.0.3, and scikit-learn 1.9.0. Model artifacts include companion metadata with version, feature contract, training boundary, data identity, and runtime versions.
-
-## Demo
-
-The hosted Streamlit application runs a bounded historical replay and shows the latest completed forecast, the matching persistence baseline and actual usage, recent forecast history, and the aggregate model result.
-
-Open the [live demo](https://forgecast.streamlit.app/) to inspect the system without running the repository locally.
+Captured model metadata records Python 3.13.3, NumPy 2.4.6, Pandas 3.0.3, and scikit-learn 1.9.0. The active model is stored with companion metadata that records the feature contract, training boundaries, dataset identity, and runtime versions.
 
 ## Quick Start
-
-Use Python 3.13.x to match the captured model artifact environment.
 
 ```bash
 git clone https://github.com/nayanojwal0810/ForgeCast.git
 cd ForgeCast
 python -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 python -m pytest
 streamlit run streamlit_app.py
 ```
 
-The repository includes the raw dataset and serialized model artifacts used by the demonstration. The model artifact format is environment-sensitive, so matching the recorded runtime versions is recommended.
+Activate `.venv` with the normal command for your shell before installing packages if needed. The repository's `pyproject.toml` configures `src/` on the test path, and `streamlit_app.py` is the hosted/local entrypoint.
 
 ## Repository Structure
 
@@ -100,10 +150,10 @@ ForgeCast/
 ├── artifacts/
 │   ├── experiments/     # evaluation and retraining evidence
 │   └── models/          # active and candidate model artifacts
-├── data/raw/            # UCI source dataset
-├── docs/                # architecture, lifecycle, validation
+├── data/raw/            # source telemetry dataset
+├── docs/                # technical documentation
 ├── scripts/             # evaluation, smoke-test, retraining runners
-├── src/forgecast/       # ingestion, replay, features, models, runtime
+├── src/forgecast/       # ingestion, features, models, runtime, UI
 ├── tests/               # unit and integration tests
 ├── requirements.txt
 └── streamlit_app.py
@@ -111,20 +161,22 @@ ForgeCast/
 
 ## Limitations
 
-ForgeCast demonstrates a controlled historical ML lifecycle, not enterprise production MLOps. The current system uses one industrial dataset/site, one forecast horizon, local file artifacts, in-memory runtime state, and a hosted historical replay. It has no live SCADA or telemetry connector, persistent model registry, distributed serving layer, probabilistic forecast intervals, or measured business-impact model.
+ForgeCast demonstrates a controlled historical ML workflow. It is not an enterprise production system.
 
-Recent rolling windows can also favor persistence even when pooled chronological evidence favors ML. For that reason, the project exposes both baseline comparisons and rolling diagnostics rather than presenting a single point-in-time win as proof of general superiority.
+The current implementation uses one industrial dataset/site, one 15-minute forecast horizon, local file artifacts, in-memory runtime state, and historical replay. It does not include live SCADA/telemetry integration, a persistent model registry, distributed serving, probabilistic prediction intervals, or measured business impact.
+
+Short windows can also favor persistence even when pooled chronological evidence favors ML. The documentation therefore reports both aggregate holdout results and rolling diagnostics.
 
 ## Future Improvements
 
-The next engineering steps would be to connect live telemetry with durable state, introduce a persistent model registry and audit store, automate drift and retraining workflows, add probabilistic and multi-horizon forecasts, and evaluate the model against operational decisions such as peak-load mitigation or energy-cost reduction.
+Natural next steps are live telemetry ingestion with durable state, a persistent model registry and audit store, automated drift/retraining workflows, probabilistic and multi-horizon forecasting, and evaluation against operational decisions such as peak-load mitigation or energy-cost reduction.
 
 ## Dataset
 
-ForgeCast uses the [UCI Steel Industry Energy Consumption dataset](https://archive.ics.uci.edu/dataset/851/steel+industry+energy+consumption). The source provides industrial energy and related telemetry for the 2018 observation period. The repository preserves the source data used to build the replay workflow.
+ForgeCast uses the [UCI Steel Industry Energy Consumption dataset](https://archive.ics.uci.edu/dataset/851/steel+industry+energy+consumption). The repository contains the source CSV used for replay and evaluation.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — runtime components, state flow, recovery, deployment surface, and design decisions.
-- [Model Lifecycle](docs/model_lifecycle.md) — forecast contract, model artifact flow, feedback, monitoring, and retraining gates.
-- [Validation](docs/validation.md) — leakage controls, chronological results, operational smoke evidence, missingness tests, and limitations.
+- [Architecture](docs/architecture.md) — system flow, state, recovery, deployment, and design trade-offs.
+- [Model Lifecycle](docs/model_lifecycle.md) — forecast definition, training, evaluation, feedback, monitoring, and retraining.
+- [Validation](docs/validation.md) — model performance, system correctness, operational behavior, missingness tests, and evidence limits.
