@@ -1,14 +1,14 @@
 # ForgeCast
 
-**15-minute-ahead industrial energy forecasting built as an end-to-end ML system, not just a model.**
+**End-to-end 15-minute-ahead industrial energy forecasting with leakage-safe evaluation, delayed feedback, monitoring, and retraining.**
 
 [Live Demo](https://forgecast.streamlit.app/) · [Architecture](docs/architecture.md) · [Model Lifecycle](docs/model_lifecycle.md) · [Validation](docs/validation.md)
 
 ## Overview
 
-ForgeCast predicts the next 15-minute industrial energy consumption value from historical telemetry. It validates each record, builds features using only information available at forecast time, produces a forecast, waits for the real target value, compares the forecast with a persistence baseline, and feeds the result into monitoring and retraining evaluation.
+ForgeCast predicts the next 15-minute industrial energy consumption value from historical telemetry. It validates each record, builds features using only information available at forecast time, produces a forecast, waits for the real target value, compares against a persistence baseline, and feeds completed results into monitoring and retraining evaluation.
 
-The project uses the UCI Steel Industry Energy Consumption dataset and a frozen scikit-learn `HistGradientBoostingRegressor`. The hosted Streamlit app runs a bounded historical replay through the same core runtime used by the tests.
+The project uses the UCI Steel Industry Energy Consumption dataset and a frozen scikit-learn `HistGradientBoostingRegressor`. The hosted Streamlit app runs a bounded historical replay using the same `forgecast` runtime components covered by the test suite.
 
 Typical forecasting project:
 
@@ -25,11 +25,11 @@ telemetry -> validation -> causal features -> forecast
 -> versioned artifact
 ```
 
-## Why This Project
+## Why ForgeCast
 
-The interesting part is not only the model score. Short-horizon time-series ML can look better than it really is when future values leak into features, random splits ignore time, or delayed labels and missing intervals are handled loosely.
+ForgeCast was built to treat forecasting as a temporal workflow rather than a single model training script. The model must use only information available at the forecast cutoff, predictions must remain pending until their targets arrive, and missing telemetry must not silently contaminate later forecasts.
 
-ForgeCast treats those as engineering problems. The implementation includes causal features, chronological holdout evaluation, a persistence baseline, exact prediction-to-ground-truth pairing, missing telemetry recovery, rolling monitoring, retraining candidate evaluation, and versioned model artifacts.
+That leads to a few deliberate engineering choices: causal feature alignment, chronological evaluation, a persistence baseline, exact prediction-to-ground-truth pairing, explicit gap recovery, rolling monitoring, temporal retraining boundaries, and versioned model artifacts.
 
 ## Key Results
 
@@ -48,7 +48,7 @@ Operational replay over the complete 35,040-row dataset produced 34,945 predicti
 
 The latest full local test run recorded **106 passed**.
 
-These are historical evaluation and replay results. They are not measurements from a live plant deployment.
+These are historical evaluation and replay results, not measurements from a live plant deployment.
 
 ## How It Works
 
@@ -82,11 +82,11 @@ Completed feedback updates cumulative metrics and bounded 24-hour and 7-day wind
 
 ### 6. Recover from missing telemetry
 
-When a positive telemetry gap occurs, affected predictions are marked unscorable. Feature state is reset and the next segment must collect 96 contiguous observations before forecasting resumes. Missing Usage values are not imputed.
+When a positive telemetry gap occurs, affected predictions are marked unscorable. Feature state is reset, and the next segment must collect 96 contiguous observations before forecasting resumes. Missing Usage values are not imputed.
 
 ### 7. Evaluate retraining candidates
 
-Candidate models are trained and validated using `target_timestamp` boundaries. A candidate must beat persistence by at least 5.0% to pass the implemented baseline gate. Candidate artifacts are kept separate from the active v1 artifact.
+Candidate models are trained and validated using `target_timestamp` boundaries. A candidate must beat persistence by at least 5.0% to pass the implemented baseline gate. Candidate artifacts remain separate from the active v1 artifact.
 
 ## Architecture
 
@@ -109,14 +109,14 @@ The detailed [architecture document](docs/architecture.md) covers state manageme
 
 | Feature | Why it matters |
 | --- | --- |
-| Leakage-safe time alignment | Prevents future target information from entering the forecast. |
-| Chronological evaluation | Tests the model on later time periods instead of randomly shuffled rows. |
+| Leakage-safe time alignment | Keeps future target information out of the forecast. |
+| Chronological evaluation | Tests later time periods instead of randomly shuffled rows. |
 | Persistence baseline | Provides an inference-available sanity check. |
-| Stateful inference | Keeps the runtime close to a streaming forecast loop. |
-| Delayed feedback | Scores predictions only after their real targets arrive. |
+| Stateful inference | Mirrors a streaming-style forecast loop. |
+| Delayed feedback | Scores predictions only after their targets arrive. |
 | Missingness recovery | Prevents stale pre-gap history from contaminating later features. |
 | Model-version tracking | Keeps feedback and metrics attributable to the generating artifact. |
-| Retraining gate | Evaluates candidates with explicit temporal and performance criteria. |
+| Retraining gate | Applies explicit temporal and performance criteria to candidates. |
 
 ## Tech Stack
 
@@ -148,16 +148,16 @@ ForgeCast/
 ├── docs/                # technical documentation
 ├── scripts/             # evaluation, smoke-test, retraining runners
 ├── src/forgecast/       # ingestion, features, models, runtime, UI
-├── tests/               # unit and integration tests
+├── tests/                # unit and integration tests
 ├── requirements.txt
 └── streamlit_app.py
 ```
 
 ## Limitations
 
-ForgeCast demonstrates a controlled historical ML workflow. It is not an enterprise production system.
+ForgeCast demonstrates a controlled historical ML workflow, not an enterprise production system.
 
-The current implementation uses one industrial dataset/site, one 15-minute forecast horizon, local file artifacts, in-memory runtime state, and historical replay. It does not include live SCADA/telemetry integration, a persistent model registry, distributed serving, probabilistic prediction intervals, or measured business impact.
+The current implementation uses one public steel-industry dataset, one 15-minute forecast horizon, local file artifacts, in-memory runtime state, and historical replay. It does not include live SCADA/telemetry integration, a persistent model registry, distributed serving, probabilistic prediction intervals, or measured business impact.
 
 Short windows can also favor persistence even when pooled chronological evidence favors ML. The documentation therefore reports both aggregate holdout results and rolling diagnostics.
 
