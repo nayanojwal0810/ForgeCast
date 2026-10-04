@@ -86,9 +86,17 @@ The 2018 Q3 candidate was evaluated using target-time partitions:
 
 The existing v1 artifact was not used as a reference for this Q3 comparison because its training target boundary overlaps the Q3 evaluation period. Treating it as a reference would make the comparison in-sample.
 
-## Automated Tests
+## Automated Validation
 
-The latest full local test run recorded **106 passed**. Coverage includes ingestion contracts, replay order, temporal boundaries, feature generation, model validation, operational feedback, monitoring, missing-data recovery, retraining, and Streamlit UI behavior.
+The repository contains nine focused test modules covering ingestion contracts, replay order, temporal boundaries, causal feature generation, model validation, operational feedback, monitoring, missing-data recovery, retraining, and Streamlit UI behavior.
+
+Run the full suite locally with:
+
+```bash
+python -m pytest
+```
+
+The documentation does not rely on a fixed pass-count claim; the executable test suite is the source of truth for the current result.
 
 ## Operational Diagnostics
 
