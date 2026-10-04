@@ -31,7 +31,7 @@ ForgeCast was built to treat forecasting as a temporal workflow rather than a si
 
 That leads to a few deliberate engineering choices: causal feature alignment, chronological evaluation, a persistence baseline, exact prediction-to-ground-truth pairing, explicit gap recovery, rolling monitoring, temporal retraining boundaries, and versioned model artifacts.
 
-## Key Results
+## Evidence at a Glance
 
 The frozen v1 model was evaluated on three expanding chronological holdout windows, each containing 3,504 observations.
 
